@@ -134,9 +134,19 @@ $('loginForm').addEventListener('submit',async e=>{
   if(authMode==='register'){
    try {
     credential=await firebase.auth().createUserWithEmailAndPassword(email,$('password').value);
+    await credential.user.sendEmailVerification();
+    await firebase.auth().signOut();
+    showMessage('loginMessage','Enviamos um link de confirmação para seu e-mail. Confirme o endereço e depois volte aqui, selecione “Criar cadastro” e envie novamente a solicitação.');
+    button.disabled=false;button.textContent='Solicitar acesso';return;
    } catch(createError) {
     if(createError.code!=='auth/email-already-in-use') throw createError;
     credential=await firebase.auth().signInWithEmailAndPassword(email,$('password').value);
+   }
+   if(!credential.user.emailVerified){
+    await credential.user.sendEmailVerification();
+    await firebase.auth().signOut();
+    showMessage('loginMessage','Seu e-mail ainda não foi confirmado. Enviamos novamente o link de confirmação; verifique sua caixa de entrada.');
+    button.disabled=false;button.textContent='Solicitar acesso';return;
    }
    const idToken=await credential.user.getIdToken(true);
    const registration=await api('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idToken,name:$('fullName').value.trim(),phone:$('phone').value.trim()})});

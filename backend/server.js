@@ -160,8 +160,8 @@ app.post('/api/auth/register', async (req, res) => {
     if (!idToken) return res.status(401).json({ error: 'invalid_credentials', message: 'Não foi possível validar o cadastro.' });
     const decoded = await getAuth().verifyIdToken(idToken);
     const email = String(decoded.email || '').trim().toLowerCase();
-    if (!email || !decoded.email_verified && req.body?.requireVerifiedEmail === true) {
-      return res.status(400).json({ error: 'email_invalid', message: 'Confirme seu e-mail antes de concluir o cadastro.' });
+    if (!email || !decoded.email_verified) {
+      return res.status(403).json({ error: 'email_not_verified', message: 'Confirme seu endereço de e-mail pelo link enviado pelo Firebase antes de solicitar acesso.' });
     }
     const isOwner = email === adminEmail;
     const ref = db.ref('users/' + decoded.uid);
@@ -193,6 +193,7 @@ app.post('/api/auth/firebase-login', async (req, res) => {
     if (!idToken) return res.status(401).json({ error: 'invalid_credentials', message: 'Entre com seu e-mail e senha do Firebase.' });
     const decoded = await getAuth().verifyIdToken(idToken);
     const email = String(decoded.email || '').trim().toLowerCase();
+    if (!decoded.email_verified) return res.status(403).json({ error: 'email_not_verified', message: 'Confirme seu endereço de e-mail antes de entrar.' });
     const isOwner = email === adminEmail;
     const profileRef = db.ref('users/' + decoded.uid);
     let snap = await profileRef.get();
