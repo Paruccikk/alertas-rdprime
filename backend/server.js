@@ -254,7 +254,7 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-app.get('/api/dashboard', requireAdmin, requireDatabase, async (_req, res, next) => {
+app.get('/api/dashboard', requireAdmin, requireDatabase, async (req, res, next) => {
   try {
     const root = db.ref('accounts/' + req.session.uid);
     const [listsSnap, contactsSnap, importsSnap] = await Promise.all([
@@ -268,7 +268,7 @@ app.get('/api/dashboard', requireAdmin, requireDatabase, async (_req, res, next)
     });
   } catch (error) { next(error); }
 });
-app.get('/api/lists', requireAdmin, requireDatabase, async (_req, res, next) => {
+app.get('/api/lists', requireAdmin, requireDatabase, async (req, res, next) => {
   try {
     const data = valuesOf(await db.ref('accounts/' + req.session.uid + '/contact_lists').get());
     res.json(Object.entries(data).map(([id, value]) => asList(id, value)).sort((a,b) => b.createdAt - a.createdAt));
@@ -285,7 +285,7 @@ app.post('/api/lists', requireAdmin, requireDatabase, async (req, res, next) => 
     res.status(201).json({ id: ref.key, ...value, contacts: 0 });
   } catch (error) { next(error); }
 });
-app.get('/api/imports', requireAdmin, requireDatabase, async (_req, res, next) => {
+app.get('/api/imports', requireAdmin, requireDatabase, async (req, res, next) => {
   try {
     const root = db.ref('accounts/' + req.session.uid);
     const [importsSnap, listsSnap] = await Promise.all([root.child('imports').get(), root.child('contact_lists').get()]);
