@@ -89,13 +89,37 @@ async function boot(){
   try{
     await initializeFirebase();
     const state=await api('/api/auth/me');
-    if(!state.authConfigured){$('loginView').classList.remove('hidden');showMessage('loginMessage','O serviço de autenticação do Firebase ainda não está configurado no servidor.');return;}
-    if(!state.authenticated){$('loginView').classList.remove('hidden');return;}
+    if(!state.authConfigured){
+      $('appView').classList.add('hidden');
+      $('loginView').classList.remove('hidden');
+      showMessage('loginMessage','O serviço de autenticação do Firebase ainda não está configurado no servidor.');
+      return;
+    }
+    if(!state.authenticated){
+      $('appView').classList.add('hidden');
+      $('loginView').classList.remove('hidden');
+      return;
+    }
+
+    $('loginView').classList.add('hidden');
     $('appView').classList.remove('hidden');
-    if(state.role==='admin'){ $('approvalPanel').classList.remove('hidden'); await loadPendingUsers(); }
-    if(!state.databaseConfigured){showMessage('appMessage','O painel está no ar. Para salvar listas e contatos, falta conectar o Firebase Realtime Database no Render.');return;}
-    await refreshAll();
-  }catch(e){$('loginView').classList.remove('hidden');showMessage('loginMessage',e.message,true);}
+
+    if(state.role==='admin'){
+      $('approvalPanel').classList.remove('hidden');
+      try{ await loadPendingUsers(); }
+      catch(error){ showMessage('appMessage','Não foi possível carregar as solicitações: '+error.message,true); }
+    }
+    if(!state.databaseConfigured){
+      showMessage('appMessage','O painel está no ar. Para salvar listas e contatos, falta conectar o Firebase Realtime Database no Render.');
+      return;
+    }
+    try{ await refreshAll(); }
+    catch(error){ showMessage('appMessage','Não foi possível carregar os dados do painel: '+error.message,true); }
+  }catch(e){
+    $('appView').classList.add('hidden');
+    $('loginView').classList.remove('hidden');
+    showMessage('loginMessage',e.message,true);
+  }
 }
 async function refreshAll(){
   const [stats,lists,imports]=await Promise.all([api('/api/dashboard'),api('/api/lists'),api('/api/imports')]);
