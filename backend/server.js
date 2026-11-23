@@ -42,9 +42,18 @@ try {
 }
 
 app.disable('x-powered-by');
+// API responses must never be reused from browser or intermediary caches.
+// Disable ETags to prevent stale 304 responses on authentication checks.
+app.set('etag', false);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'same-site' } }));
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 
 const cookieName = 'day_alertas_session';
 const sessionSecret = process.env.SESSION_SECRET || '';
