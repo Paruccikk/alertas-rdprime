@@ -51,25 +51,35 @@ const sessionSecret = process.env.SESSION_SECRET || '';
 const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 
 function sign(value) { return crypto.createHmac('sha256', sessionSecret).update(value).digest('base64url'); }
-function createSession(email, uid) {
-  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 12 * 60 * 60 * 1000, email, uid })).toString('base64url');
+function createSession(email, uid, role) {
+  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 12 * 60 * 60 * 1000, email, uid, role })).toString('base64url');
   return payload + '.' + sign(payload);
 }
-function validSession(token) {
-  if (!sessionSecret || !token) return false;
+function readSession(token) {
+  if (!sessionSecret || !token) return null;
   const [payload, signature] = token.split('.');
-  if (!payload || !signature) return false;
+  if (!payload || !signature) return null;
   const expected = Buffer.from(sign(payload)), received = Buffer.from(signature);
-  if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) return false;
-  try { return JSON.parse(Buffer.from(payload, 'base64url').toString()).exp > Date.now(); } catch { return false; }
+  if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    return data.exp > Date.now() && data.uid ? data : null;
+  } catch { return null; }
 }
+function validSession(token) { return Boolean(readSession(token)); }
 function readCookie(req, name) {
   const raw = req.headers.cookie || '';
   const item = raw.split(';').map(v => v.trim()).find(v => v.startsWith(name + '='));
   return item ? decodeURIComponent(item.slice(name.length + 1)) : '';
 }
 function requireAdmin(req, res, next) {
-  if (!validSession(readCookie(req, cookieName))) return res.status(401).json({ error: 'unauthorized', message: 'Faça login para continuar.' });
+  const session = readSession(readCookie(req, cookieName));
+  if (!session) return res.status(401).json({ error: 'unauthorized', message: 'Faça login para continuar.' });
+  req.session = session;
+  next();
+}
+function requireOwner(req, res, next) {
+  if (req.session?.role !== 'admin') return res.status(403).json({ error: 'forbidden', message: 'Somente a administração pode aprovar cadastros.' });
   next();
 }
 function requireDatabase(req, res, next) {
@@ -143,40 +153,108 @@ app.get('/api/health', (_req, res) => res.json({
   ok: true, service: 'day-alertas', databaseConfigured: Boolean(db),
   database: 'Firebase Realtime Database', timestamp: new Date().toISOString()
 }));
+app.post('/api/auth/register', async (req, res) => {
+  if (!getApps().length || !db) return res.status(503).json({ error: 'auth_not_configured', message: 'Firebase não está configurado no servidor.' });
+  try {
+    const idToken = String(req.body?.idToken || '');
+    if (!idToken) return res.status(401).json({ error: 'invalid_credentials', message: 'Não foi possível validar o cadastro.' });
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const email = String(decoded.email || '').trim().toLowerCase();
+    if (!email || !decoded.email_verified && req.body?.requireVerifiedEmail === true) {
+      return res.status(400).json({ error: 'email_invalid', message: 'Confirme seu e-mail antes de concluir o cadastro.' });
+    }
+    const isOwner = email === adminEmail;
+    const ref = db.ref('users/' + decoded.uid);
+    const existing = await ref.get();
+    const previous = existing.exists() ? existing.val() : {};
+    const name = String(req.body?.name || previous.name || '').trim().slice(0, 120);
+    const phone = String(req.body?.phone || previous.phone || '').replace(/[^0-9+]/g, '').slice(0, 20);
+    if (!name) return res.status(400).json({ error: 'name_required', message: 'Informe seu nome completo.' });
+    const profile = {
+      uid: decoded.uid, name, email, phone,
+      role: isOwner ? 'admin' : 'user',
+      status: isOwner ? 'approved' : (previous.status || 'pending'),
+      createdAt: previous.createdAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    await ref.set(profile);
+    res.status(201).json({ ok: true, status: profile.status, role: profile.role, message: isOwner ? 'Conta administrativa cadastrada.' : 'Cadastro recebido. Aguarde a aprovação da administração.' });
+  } catch (error) {
+    console.error('Falha no cadastro:', error.message);
+    res.status(401).json({ error: 'invalid_credentials', message: 'Não foi possível validar o cadastro no Firebase.' });
+  }
+});
 app.post('/api/auth/firebase-login', async (req, res) => {
-  if (!adminEmail || !getApps().length) return res.status(503).json({
-    error: 'auth_not_configured',
-    message: 'Configure ADMIN_EMAIL e FIREBASE_SERVICE_ACCOUNT no Render.'
+  if (!adminEmail || !getApps().length || !db) return res.status(503).json({
+    error: 'auth_not_configured', message: 'Configure ADMIN_EMAIL e Firebase no Render.'
   });
   try {
     const idToken = String(req.body?.idToken || '');
     if (!idToken) return res.status(401).json({ error: 'invalid_credentials', message: 'Entre com seu e-mail e senha do Firebase.' });
     const decoded = await getAuth().verifyIdToken(idToken);
-    if (String(decoded.email || '').trim().toLowerCase() !== adminEmail) {
-      return res.status(403).json({ error: 'not_authorized', message: 'Este usuário não tem permissão para acessar o painel.' });
+    const email = String(decoded.email || '').trim().toLowerCase();
+    const isOwner = email === adminEmail;
+    const profileRef = db.ref('users/' + decoded.uid);
+    let snap = await profileRef.get();
+    if (!snap.exists() && isOwner) {
+      await profileRef.set({ uid: decoded.uid, name: 'Administrador', email, phone: '', role: 'admin', status: 'approved', createdAt: Date.now(), updatedAt: Date.now() });
+      snap = await profileRef.get();
     }
-    res.cookie(cookieName, createSession(adminEmail, decoded.uid), {
+    if (!snap.exists()) return res.status(403).json({ error: 'registration_required', message: 'Cadastro não localizado. Saia e conclua o cadastro primeiro.' });
+    const profile = snap.val();
+    if (profile.status !== 'approved') return res.status(403).json({
+      error: profile.status === 'rejected' ? 'registration_rejected' : 'approval_pending',
+      message: profile.status === 'rejected' ? 'Seu cadastro não foi aprovado. Entre em contato com a administração.' : 'Seu cadastro está aguardando aprovação da administração.'
+    });
+    const role = isOwner ? 'admin' : 'user';
+    res.cookie(cookieName, createSession(email, decoded.uid, role), {
       httpOnly: true, secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict', maxAge: 12 * 60 * 60 * 1000, path: '/'
     });
-    res.json({ ok: true, email: adminEmail });
-  } catch {
+    res.json({ ok: true, email, role });
+  } catch (error) {
+    console.error('Falha no login Firebase:', error.message);
     res.status(401).json({ error: 'invalid_credentials', message: 'Não foi possível validar seu acesso no Firebase.' });
   }
+});
+app.get('/api/admin/users', requireAdmin, requireOwner, requireDatabase, async (_req, res, next) => {
+  try {
+    const users = valuesOf(await db.ref('users').get());
+    res.json(Object.entries(users).map(([uid, user]) => ({ uid, name: user.name || '', email: user.email || '', phone: user.phone || '', status: user.status || 'pending', role: user.role || 'user', createdAt: user.createdAt || 0 })).sort((a,b) => b.createdAt - a.createdAt));
+  } catch (error) { next(error); }
+});
+app.patch('/api/admin/users/:uid/approval', requireAdmin, requireOwner, requireDatabase, async (req, res, next) => {
+  try {
+    const uid = String(req.params.uid || '');
+    const status = String(req.body?.status || '');
+    if (!uid || !['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'invalid_status', message: 'Ação de aprovação inválida.' });
+    if (uid === req.session.uid) return res.status(400).json({ error: 'invalid_target', message: 'Não é possível alterar o próprio acesso por esta tela.' });
+    const ref = db.ref('users/' + uid);
+    const snap = await ref.get();
+    if (!snap.exists()) return res.status(404).json({ error: 'user_not_found', message: 'Cadastro não encontrado.' });
+    const user = snap.val();
+    if (user.role === 'admin') return res.status(403).json({ error: 'protected_user', message: 'Não é possível alterar outro administrador.' });
+    await ref.update({ status, reviewedAt: Date.now(), reviewedBy: req.session.uid, updatedAt: Date.now() });
+    res.json({ ok: true, uid, status });
+  } catch (error) { next(error); }
 });
 app.post('/api/auth/logout', (_req, res) => {
   res.clearCookie(cookieName, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/' });
   res.json({ ok: true });
 });
-app.get('/api/auth/me', (req, res) => res.json({
-  authenticated: validSession(readCookie(req, cookieName)),
-  authConfigured: Boolean(adminEmail && getApps().length), adminEmail, databaseConfigured: Boolean(db)
-}));
+app.get('/api/auth/me', (req, res) => {
+  const session = readSession(readCookie(req, cookieName));
+  res.json({
+    authenticated: Boolean(session), role: session?.role || null, uid: session?.uid || null,
+    authConfigured: Boolean(adminEmail && getApps().length), databaseConfigured: Boolean(db)
+  });
+});
 
 app.get('/api/dashboard', requireAdmin, requireDatabase, async (_req, res, next) => {
   try {
+    const root = db.ref('accounts/' + req.session.uid);
     const [listsSnap, contactsSnap, importsSnap] = await Promise.all([
-      db.ref('contact_lists').get(), db.ref('contacts').get(), db.ref('imports').get()
+      root.child('contact_lists').get(), root.child('contacts').get(), root.child('imports').get()
     ]);
     const lists = valuesOf(listsSnap), contacts = valuesOf(contactsSnap), imports = valuesOf(importsSnap);
     res.json({
@@ -188,7 +266,7 @@ app.get('/api/dashboard', requireAdmin, requireDatabase, async (_req, res, next)
 });
 app.get('/api/lists', requireAdmin, requireDatabase, async (_req, res, next) => {
   try {
-    const data = valuesOf(await db.ref('contact_lists').get());
+    const data = valuesOf(await db.ref('accounts/' + req.session.uid + '/contact_lists').get());
     res.json(Object.entries(data).map(([id, value]) => asList(id, value)).sort((a,b) => b.createdAt - a.createdAt));
   } catch (error) { next(error); }
 });
@@ -197,7 +275,7 @@ app.post('/api/lists', requireAdmin, requireDatabase, async (req, res, next) => 
     const name = String(req.body?.name || '').trim().slice(0, 120);
     const description = String(req.body?.description || '').trim().slice(0, 500);
     if (!name) return res.status(400).json({ error: 'name_required', message: 'Informe o nome da lista.' });
-    const ref = db.ref('contact_lists').push();
+    const ref = db.ref('accounts/' + req.session.uid + '/contact_lists').push();
     const value = { name, description, contactCount: 0, createdAt: Date.now() };
     await ref.set(value);
     res.status(201).json({ id: ref.key, ...value, contacts: 0 });
@@ -205,7 +283,8 @@ app.post('/api/lists', requireAdmin, requireDatabase, async (req, res, next) => 
 });
 app.get('/api/imports', requireAdmin, requireDatabase, async (_req, res, next) => {
   try {
-    const [importsSnap, listsSnap] = await Promise.all([db.ref('imports').get(), db.ref('contact_lists').get()]);
+    const root = db.ref('accounts/' + req.session.uid);
+    const [importsSnap, listsSnap] = await Promise.all([root.child('imports').get(), root.child('contact_lists').get()]);
     const imports = valuesOf(importsSnap), lists = valuesOf(listsSnap);
     res.json(Object.entries(imports).map(([id, value]) => ({
       id, ...value, list_name: lists[value.listId]?.name || 'Lista'
@@ -216,14 +295,15 @@ app.post('/api/imports', requireAdmin, requireDatabase, upload.single('file'), a
   try {
     if (!req.file) return res.status(400).json({ error: 'file_required', message: 'Selecione um arquivo.' });
     const listId = String(req.body.listId || '');
-    const listRef = db.ref('contact_lists/' + listId);
+    const root = db.ref('accounts/' + req.session.uid);
+    const listRef = root.child('contact_lists/' + listId);
     const listSnap = await listRef.get();
     if (!listSnap.exists()) return res.status(400).json({ error: 'list_not_found', message: 'Selecione uma lista válida.' });
     const rows = await parseUpload(req.file);
     if (!rows.length) return res.status(400).json({ error: 'empty_file', message: 'O arquivo não contém linhas de dados.' });
     if (rows.length > 20000) return res.status(413).json({ error: 'too_many_rows', message: 'O limite por importação é de 20.000 linhas.' });
 
-    const importRef = db.ref('imports').push();
+    const importRef = root.child('imports').push();
     const importRecord = {
       listId, original_filename: req.file.originalname.slice(0, 255),
       status: 'processing', total_rows: rows.length, imported_rows: 0,
@@ -231,7 +311,7 @@ app.post('/api/imports', requireAdmin, requireDatabase, upload.single('file'), a
     };
     await importRef.set(importRecord);
 
-    const contacts = valuesOf(await db.ref('contacts').get());
+    const contacts = valuesOf(await root.child('contacts').get());
     const emailIndex = new Map(), phoneIndex = new Map();
     for (const [id, c] of Object.entries(contacts)) {
       if (c.email) emailIndex.set(c.email, id);
@@ -263,7 +343,7 @@ app.post('/api/imports', requireAdmin, requireDatabase, upload.single('file'), a
         updates['contacts/' + existingId] = next;
         duplicates++;
       } else {
-        const ref = db.ref('contacts').push();
+        const ref = root.child('contacts').push();
         const value = {
           email, phone, full_name: name, city, state, interest,
           source: source || req.file.originalname.slice(0, 160),
@@ -286,14 +366,14 @@ app.post('/api/imports', requireAdmin, requireDatabase, upload.single('file'), a
       ...importRecord, status: 'completed', imported_rows: imported,
       duplicate_rows: duplicates, rejected_rows: rejected, completedAt: Date.now()
     };
-    await db.ref().update(updates);
+    await root.update(updates);
     res.status(201).json({ id: importRef.key, total: rows.length, imported, duplicates, rejected });
   } catch (error) { next(error); }
 });
 app.get('/api/contacts', requireAdmin, requireDatabase, async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim().toLocaleLowerCase('pt-BR').slice(0, 100);
-    const data = valuesOf(await db.ref('contacts').get());
+    const data = valuesOf(await db.ref('accounts/' + req.session.uid + '/contacts').get());
     const rows = Object.entries(data).map(([id, c]) => ({
       id, full_name: c.full_name, email: c.email, phone: c.phone,
       city: c.city, state: c.state, interest: c.interest,

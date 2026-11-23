@@ -33,7 +33,7 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
 .message{font-size:13px;padding:10px 12px;border-radius:9px;margin:12px 0;background:#f0f4f1;color:#345544}
 .message.error{background:#fff0ef;color:#9a3932}
 .login{max-width:420px;margin:10vh auto;background:white;border:1px solid #e3e9e5;border-radius:18px;padding:28px}
-.login .field{margin:18px 0}.footer{padding:30px 0;color:#8a958e;font-size:12px}
+.login .field{margin:18px 0}.approval-panel{background:#fff;border:1px solid #e3e9e5;border-radius:16px;padding:20px;margin:18px 0}.approval-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-top:1px solid #edf0ed}.approval-actions{display:flex;gap:8px;flex-wrap:wrap}.btn.small{padding:7px 10px;font-size:12px}.footer{padding:30px 0;color:#8a958e;font-size:12px}
 @media(max-width:800px){.layout{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.shell{padding:22px 16px}.top{align-items:flex-start}.top-right{flex-direction:column;align-items:flex-end}}
 @media(max-width:480px){.stats{grid-template-columns:1fr}.top{margin-bottom:26px}.brand{font-size:22px}}
 </style></head>
@@ -42,7 +42,7 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
   <div class="brand">day<span>alertas</span></div>
   <h1 style="font-size:27px;margin-top:25px">Acessar painel</h1>
   <p class="muted">Entre com seu usuário do Firebase para gerenciar suas listas.</p>
-  <form id="loginForm"><div class="field"><label for="email">E-mail</label><input id="email" type="email" autocomplete="username" value="danielparuccikk@gmail.com" required></div><div class="field"><label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" minlength="8" required></div><button id="authSubmit" class="btn" style="width:100%">Entrar</button></form><button id="toggleAuth" class="btn secondary" type="button" style="width:100%;margin-top:10px">Ainda não tenho conta — Criar cadastro</button>
+  <form id="loginForm"><div id="registerFields" class="hidden"><div class="field"><label for="fullName">Nome completo</label><input id="fullName" type="text" autocomplete="name" maxlength="120"></div><div class="field"><label for="phone">WhatsApp com DDD</label><input id="phone" type="tel" autocomplete="tel" placeholder="Ex.: 5511999999999" maxlength="20"></div></div><div class="field"><label for="email">E-mail</label><input id="email" type="email" autocomplete="username" required></div><div class="field"><label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" minlength="6" required></div><button id="authSubmit" class="btn" style="width:100%">Entrar</button></form><button id="toggleAuth" class="btn secondary" type="button" style="width:100%;margin-top:10px">Ainda não tenho conta — Criar cadastro</button>
   <div id="loginMessage" class="message hidden"></div>
 </section>
 <main id="appView" class="shell hidden">
@@ -50,7 +50,7 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
   <h1>Suas listas, mais oportunidades.</h1>
   <p class="lead">Importe contatos, organize suas bases e prepare suas próximas campanhas de relacionamento imobiliário em um só lugar.</p>
   <div class="actions"><button class="btn" id="newListBtn">＋ Nova lista</button><button class="btn secondary" id="importBtn">↑ Importar planilha</button></div>
-  <section class="stats">
+  <section id="approvalPanel" class="approval-panel hidden"><div class="panel-head"><h2>Solicitações de acesso</h2><button class="btn secondary" id="refreshUsersBtn">Atualizar</button></div><div id="pendingUsers" class="list"><div class="empty">Carregando solicitações...</div></div></section><section class="stats">
     <div class="stat"><small>Listas cadastradas</small><strong id="statLists">—</strong></div>
     <div class="stat"><small>Contatos ativos</small><strong id="statContacts">—</strong></div>
     <div class="stat"><small>Importações concluídas</small><strong id="statImports">—</strong></div>
@@ -92,6 +92,7 @@ async function boot(){
     if(!state.authConfigured){$('loginView').classList.remove('hidden');showMessage('loginMessage','O acesso administrativo ainda precisa ser configurado no Render.');return;}
     if(!state.authenticated){$('loginView').classList.remove('hidden');return;}
     $('appView').classList.remove('hidden');
+    if(state.role==='admin'){ $('approvalPanel').classList.remove('hidden'); await loadPendingUsers(); }
     if(!state.databaseConfigured){showMessage('appMessage','O painel está no ar. Para salvar listas e contatos, falta conectar o Firebase Realtime Database no Render.');return;}
     await refreshAll();
   }catch(e){$('loginView').classList.remove('hidden');showMessage('loginMessage',e.message,true);}
@@ -116,38 +117,65 @@ function closeModal(){$('modalRoot').innerHTML='';}
 let authMode='login';
 $('toggleAuth').addEventListener('click',()=>{
  authMode=authMode==='login'?'register':'login';
- $('authSubmit').textContent=authMode==='login'?'Entrar':'Criar minha conta';
+ $('registerFields').classList.toggle('hidden',authMode!=='register');
+ $('fullName').required=authMode==='register'; $('phone').required=authMode==='register';
+ $('authSubmit').textContent=authMode==='login'?'Entrar':'Solicitar acesso';
  $('toggleAuth').textContent=authMode==='login'?'Ainda não tenho conta — Criar cadastro':'Já tenho conta — Entrar';
  $('password').autocomplete=authMode==='login'?'current-password':'new-password';
  $('loginMessage').classList.add('hidden');
 });
 $('loginForm').addEventListener('submit',async e=>{
  e.preventDefault();const button=$('authSubmit');
- button.disabled=true;button.textContent=authMode==='login'?'Entrando...':'Criando conta...';
+ button.disabled=true;button.textContent=authMode==='login'?'Entrando...':'Enviando solicitação...';
  try{
   if(!firebaseReady) await initializeFirebase();
+  const email=$('email').value.trim().toLowerCase();
   let credential;
   if(authMode==='register'){
-   if($('email').value.trim().toLowerCase()!=='danielparuccikk@gmail.com') throw new Error('O cadastro inicial está reservado ao e-mail administrador autorizado.');
-   credential=await firebase.auth().createUserWithEmailAndPassword($('email').value.trim(),$('password').value);
+   try {
+    credential=await firebase.auth().createUserWithEmailAndPassword(email,$('password').value);
+   } catch(createError) {
+    if(createError.code!=='auth/email-already-in-use') throw createError;
+    credential=await firebase.auth().signInWithEmailAndPassword(email,$('password').value);
+   }
+   const idToken=await credential.user.getIdToken(true);
+   const registration=await api('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idToken,name:$('fullName').value.trim(),phone:$('phone').value.trim()})});
+   if(registration.status==='pending'){
+    await firebase.auth().signOut();
+    showMessage('loginMessage','Cadastro recebido! Você poderá entrar depois que a administração aprovar seu acesso.');
+    button.disabled=false;button.textContent='Solicitar acesso';return;
+   }
   }else{
-   credential=await firebase.auth().signInWithEmailAndPassword($('email').value.trim(),$('password').value);
+   credential=await firebase.auth().signInWithEmailAndPassword(email,$('password').value);
   }
   const idToken=await credential.user.getIdToken(true);
   await api('/api/auth/firebase-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idToken})});
   location.reload();
  }catch(err){
   const messages={
-   'auth/email-already-in-use':'Este e-mail já possui cadastro. Use a opção Entrar.',
    'auth/weak-password':'A senha precisa ter pelo menos 6 caracteres.',
    'auth/invalid-email':'Informe um e-mail válido.',
    'auth/invalid-credential':'E-mail ou senha incorretos.',
-   'auth/operation-not-allowed':'Ative E-mail/senha em Firebase > Authentication > Sign-in method.'
+   'auth/operation-not-allowed':'Ative E-mail/senha em Firebase > Authentication > Sign-in method.',
+   'auth/api-key-not-valid.-please-pass-a-valid-api-key.':'A chave Web do Firebase não foi aceita. Confira FIREBASE_WEB_API_KEY e as restrições da chave no Google Cloud.',
+   'approval_pending':'Seu cadastro está aguardando aprovação da administração.',
+   'registration_rejected':'Seu cadastro não foi aprovado. Entre em contato com a administração.'
   };
   showMessage('loginMessage',messages[err.code]||err.message,true);
-  button.disabled=false;button.textContent=authMode==='login'?'Entrar':'Criar minha conta';
+  button.disabled=false;button.textContent=authMode==='login'?'Entrar':'Solicitar acesso';
  }
 });
+async function loadPendingUsers(){
+ const users=await api('/api/admin/users');
+ const pending=users.filter(u=>u.status==='pending');
+ $('pendingUsers').innerHTML=pending.length?pending.map(u=>'<div class="approval-row"><div><strong>'+escapeHtml(u.name||'Sem nome')+'</strong><small>'+escapeHtml(u.email)+' · '+escapeHtml(u.phone||'WhatsApp não informado')+'</small></div><div class="approval-actions"><button class="btn small" data-uid="'+escapeHtml(u.uid)+'" data-status="approved">Aprovar</button><button class="btn secondary small" data-uid="'+escapeHtml(u.uid)+'" data-status="rejected">Recusar</button></div></div>').join(''):'<div class="empty">Nenhuma solicitação pendente.</div>';
+ $('pendingUsers').querySelectorAll('button[data-uid]').forEach(btn=>btn.addEventListener('click',async()=>{
+  btn.disabled=true;
+  try{await api('/api/admin/users/'+encodeURIComponent(btn.dataset.uid)+'/approval',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:btn.dataset.status})});await loadPendingUsers();}
+  catch(error){showMessage('appMessage',error.message,true);btn.disabled=false;}
+ }));
+}
+$('refreshUsersBtn').addEventListener('click',()=>loadPendingUsers().catch(e=>showMessage('appMessage',e.message,true)));
 $('logoutBtn').addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});location.reload();});
 $('refreshBtn').addEventListener('click',()=>refreshAll().catch(e=>showMessage('appMessage',e.message,true)));
 $('contactSearch').addEventListener('input',()=>loadContacts().catch(()=>{}));
