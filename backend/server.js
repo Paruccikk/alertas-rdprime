@@ -418,11 +418,10 @@ app.delete('/api/contacts/:id', requireAdmin, requireDatabase, async (req, res, 
     if (!snap.exists()) return res.status(404).json({ error: 'contact_not_found', message: 'Contato não encontrado.' });
     const contact = snap.val();
     const lists = valuesOf(await root.child('contact_lists').get());
+    const allContacts = valuesOf(await root.child('contacts').get());
     const updates = { ['contacts/' + id]: null };
     for (const listId of Object.keys(contact.listIds || {})) {
       if (!lists[listId]) continue;
-      const countSnap = await root.child('contacts').get();
-      const allContacts = valuesOf(countSnap);
       const count = Object.entries(allContacts).filter(([contactId, item]) =>
         contactId !== id && item.listIds?.[listId] && item.status !== 'unsubscribed'
       ).length;
