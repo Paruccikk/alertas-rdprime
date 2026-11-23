@@ -162,10 +162,10 @@ app.post('/api/auth/register', async (req, res) => {
     if (!email || !decoded.email_verified) {
       return res.status(403).json({ error: 'email_not_verified', message: 'Confirme seu endereço de e-mail pelo link enviado pelo Firebase antes de solicitar acesso.' });
     }
-    const isAdmin = previous.role === 'admin';
     const ref = db.ref('users/' + decoded.uid);
     const existing = await ref.get();
     const previous = existing.exists() ? existing.val() : {};
+    const isAdmin = previous.role === 'admin';
     const name = String(req.body?.name || previous.name || '').trim().slice(0, 120);
     const phone = String(req.body?.phone || previous.phone || '').replace(/[^0-9+]/g, '').slice(0, 20);
     if (!name) return res.status(400).json({ error: 'name_required', message: 'Informe seu nome completo.' });
