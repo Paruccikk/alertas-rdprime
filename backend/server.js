@@ -133,6 +133,12 @@ async function parseUpload(file) {
 function valuesOf(snapshot) { return snapshot.exists() ? snapshot.val() || {} : {}; }
 function asList(id, value) { return { id, ...value, contacts: Number(value.contactCount || 0) }; }
 
+app.get('/api/public-config', (_req, res) => res.json({
+  apiKey: process.env.FIREBASE_WEB_API_KEY || '',
+  authDomain: 'alertasrdprime.firebaseapp.com',
+  projectId: 'alertasrdprime',
+  appId: '1:575904361143:web:b6e5ade434ed8b714a3b32'
+}));
 app.get('/api/health', (_req, res) => res.json({
   ok: true, service: 'day-alertas', databaseConfigured: Boolean(db),
   database: 'Firebase Realtime Database', timestamp: new Date().toISOString()

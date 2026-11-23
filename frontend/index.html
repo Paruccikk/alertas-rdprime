@@ -42,7 +42,7 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
   <div class="brand">day<span>alertas</span></div>
   <h1 style="font-size:27px;margin-top:25px">Acessar painel</h1>
   <p class="muted">Entre com seu usuário do Firebase para gerenciar suas listas.</p>
-  <form id="loginForm"><div class="field"><label for="email">E-mail</label><input id="email" type="email" autocomplete="username" value="danielparuccikk@gmail.com" required></div><div class="field"><label for="password">Senha do Firebase</label><input id="password" type="password" autocomplete="current-password" required></div><button class="btn" style="width:100%">Entrar</button></form>
+  <form id="loginForm"><div class="field"><label for="email">E-mail</label><input id="email" type="email" autocomplete="username" value="danielparuccikk@gmail.com" required></div><div class="field"><label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" minlength="8" required></div><button id="authSubmit" class="btn" style="width:100%">Entrar</button></form><button id="toggleAuth" class="btn secondary" type="button" style="width:100%;margin-top:10px">Ainda não tenho conta — Criar cadastro</button>
   <div id="loginMessage" class="message hidden"></div>
 </section>
 <main id="appView" class="shell hidden">
@@ -68,12 +68,13 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script>
-firebase.initializeApp({
- apiKey: "AIzaSyDtNn7FbvgVRplmvfSn8Bep3pEEeVqIlaU",
- authDomain: "alertasrdprime.firebaseapp.com",
- projectId: "alertasrdprime",
- appId: "1:575904361143:web:b6e5ade434ed8b714a3b32"
-});
+let firebaseReady=false;
+async function initializeFirebase(){
+ const cfg=await fetch('/api/public-config').then(r=>r.json());
+ if(!cfg.apiKey) throw new Error('Falta configurar FIREBASE_WEB_API_KEY no Render.');
+ if(!firebase.apps.length) firebase.initializeApp(cfg);
+ firebaseReady=true;
+}
 const $ = (id) => document.getElementById(id);
 let listsCache = [];
 function showMessage(target, text, error=false){const el=$(target);el.textContent=text;el.classList.remove('hidden','error');if(error)el.classList.add('error');}
@@ -86,6 +87,7 @@ async function api(url, options={}) {
 function fmtDate(value){return new Date(value).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'});}
 async function boot(){
   try{
+    await initializeFirebase();
     const state=await api('/api/auth/me');
     if(!state.authConfigured){$('loginView').classList.remove('hidden');showMessage('loginMessage','O acesso administrativo ainda precisa ser configurado no Render.');return;}
     if(!state.authenticated){$('loginView').classList.remove('hidden');return;}
@@ -111,17 +113,39 @@ async function loadContacts(){
 function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function openModal(content){$('modalRoot').innerHTML='<div class="modal-backdrop" id="backdrop"><section class="modal">'+content+'</section></div>'; $('backdrop').addEventListener('click',e=>{if(e.target.id==='backdrop')closeModal();});}
 function closeModal(){$('modalRoot').innerHTML='';}
+let authMode='login';
+$('toggleAuth').addEventListener('click',()=>{
+ authMode=authMode==='login'?'register':'login';
+ $('authSubmit').textContent=authMode==='login'?'Entrar':'Criar minha conta';
+ $('toggleAuth').textContent=authMode==='login'?'Ainda não tenho conta — Criar cadastro':'Já tenho conta — Entrar';
+ $('password').autocomplete=authMode==='login'?'current-password':'new-password';
+ $('loginMessage').classList.add('hidden');
+});
 $('loginForm').addEventListener('submit',async e=>{
- e.preventDefault();const button=e.target.querySelector('button[type="submit"],button:not([type])');
- button.disabled=true;button.textContent='Entrando...';
+ e.preventDefault();const button=$('authSubmit');
+ button.disabled=true;button.textContent=authMode==='login'?'Entrando...':'Criando conta...';
  try{
-  const credential=await firebase.auth().signInWithEmailAndPassword($('email').value.trim(),$('password').value);
+  if(!firebaseReady) await initializeFirebase();
+  let credential;
+  if(authMode==='register'){
+   if($('email').value.trim().toLowerCase()!=='danielparuccikk@gmail.com') throw new Error('O cadastro inicial está reservado ao e-mail administrador autorizado.');
+   credential=await firebase.auth().createUserWithEmailAndPassword($('email').value.trim(),$('password').value);
+  }else{
+   credential=await firebase.auth().signInWithEmailAndPassword($('email').value.trim(),$('password').value);
+  }
   const idToken=await credential.user.getIdToken(true);
   await api('/api/auth/firebase-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idToken})});
   location.reload();
  }catch(err){
-  const msg=err.code==='auth/invalid-credential'||err.code==='auth/wrong-password'||err.code==='auth/user-not-found'?'E-mail ou senha do Firebase incorretos.':err.message;
-  showMessage('loginMessage',msg,true);button.disabled=false;button.textContent='Entrar';
+  const messages={
+   'auth/email-already-in-use':'Este e-mail já possui cadastro. Use a opção Entrar.',
+   'auth/weak-password':'A senha precisa ter pelo menos 6 caracteres.',
+   'auth/invalid-email':'Informe um e-mail válido.',
+   'auth/invalid-credential':'E-mail ou senha incorretos.',
+   'auth/operation-not-allowed':'Ative E-mail/senha em Firebase > Authentication > Sign-in method.'
+  };
+  showMessage('loginMessage',messages[err.code]||err.message,true);
+  button.disabled=false;button.textContent=authMode==='login'?'Entrar':'Criar minha conta';
  }
 });
 $('logoutBtn').addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});location.reload();});
