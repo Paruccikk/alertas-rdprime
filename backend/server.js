@@ -388,6 +388,83 @@ app.get('/api/contacts', requireAdmin, requireDatabase, async (req, res, next) =
   } catch (error) { next(error); }
 });
 
+app.delete('/api/lists/:id', requireAdmin, requireDatabase, async (req, res, next) => {
+  try {
+    const id = String(req.params.id || '');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return res.status(400).json({ error: 'invalid_list', message: 'Lista inválida.' });
+    const root = db.ref('accounts/' + req.session.uid);
+    const listRef = root.child('contact_lists/' + id);
+    const listSnap = await listRef.get();
+    if (!listSnap.exists()) return res.status(404).json({ error: 'list_not_found', message: 'Lista não encontrada.' });
+    const contacts = valuesOf(await root.child('contacts').get());
+    const updates = { ['contact_lists/' + id]: null };
+    for (const [contactId, contact] of Object.entries(contacts)) {
+      if (!contact.listIds?.[id]) continue;
+      const listIds = { ...(contact.listIds || {}) };
+      delete listIds[id];
+      updates['contacts/' + contactId + '/listIds'] = Object.keys(listIds).length ? listIds : null;
+    }
+    await root.update(updates);
+    res.json({ ok: true, id, message: 'Lista excluída. Os contatos foram preservados.' });
+  } catch (error) { next(error); }
+});
+app.delete('/api/contacts/:id', requireAdmin, requireDatabase, async (req, res, next) => {
+  try {
+    const id = String(req.params.id || '');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return res.status(400).json({ error: 'invalid_contact', message: 'Contato inválido.' });
+    const root = db.ref('accounts/' + req.session.uid);
+    const contactRef = root.child('contacts/' + id);
+    const snap = await contactRef.get();
+    if (!snap.exists()) return res.status(404).json({ error: 'contact_not_found', message: 'Contato não encontrado.' });
+    const contact = snap.val();
+    const lists = valuesOf(await root.child('contact_lists').get());
+    const updates = { ['contacts/' + id]: null };
+    for (const listId of Object.keys(contact.listIds || {})) {
+      if (!lists[listId]) continue;
+      const countSnap = await root.child('contacts').get();
+      const allContacts = valuesOf(countSnap);
+      const count = Object.entries(allContacts).filter(([contactId, item]) =>
+        contactId !== id && item.listIds?.[listId] && item.status !== 'unsubscribed'
+      ).length;
+      updates['contact_lists/' + listId + '/contactCount'] = count;
+      updates['contact_lists/' + listId + '/updatedAt'] = Date.now();
+    }
+    await root.update(updates);
+    res.json({ ok: true, id });
+  } catch (error) { next(error); }
+});
+app.patch('/api/contacts/:id', requireAdmin, requireDatabase, async (req, res, next) => {
+  try {
+    const id = String(req.params.id || '');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return res.status(400).json({ error: 'invalid_contact', message: 'Contato inválido.' });
+    const root = db.ref('accounts/' + req.session.uid);
+    const ref = root.child('contacts/' + id);
+    const snap = await ref.get();
+    if (!snap.exists()) return res.status(404).json({ error: 'contact_not_found', message: 'Contato não encontrado.' });
+    const body = req.body || {};
+    const full_name = String(body.full_name || '').trim().slice(0, 180);
+    const emailInput = String(body.email || '').trim();
+    const phoneInput = String(body.phone || '').trim();
+    const email = emailInput ? normalizeEmail(emailInput) : null;
+    const phone = phoneInput ? normalizePhone(phoneInput) : null;
+    if (!full_name) return res.status(400).json({ error: 'name_required', message: 'Informe o nome do contato.' });
+    if (emailInput && !email) return res.status(400).json({ error: 'invalid_email', message: 'Informe um e-mail válido.' });
+    if (phoneInput && !phone) return res.status(400).json({ error: 'invalid_phone', message: 'Informe um telefone com DDD e código do país.' });
+    if (!email && !phone) return res.status(400).json({ error: 'contact_method_required', message: 'Informe pelo menos um telefone ou e-mail.' });
+    const current = snap.val();
+    const updated = {
+      ...current, full_name, email, phone,
+      city: String(body.city || '').trim().slice(0, 100) || null,
+      state: String(body.state || '').trim().slice(0, 40) || null,
+      interest: String(body.interest || '').trim().slice(0, 160) || null,
+      updatedAt: Date.now()
+    };
+    await ref.set(updated);
+    res.json({ ok: true, id, contact: updated });
+  } catch (error) { next(error); }
+});
+
+
 app.use(express.static(frontendDir));
 app.use((err, _req, res, _next) => {
   console.error(err);
