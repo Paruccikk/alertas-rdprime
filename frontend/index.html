@@ -41,8 +41,8 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
 <section id="loginView" class="login hidden">
   <div class="brand">day<span>alertas</span></div>
   <h1 style="font-size:27px;margin-top:25px">Acessar painel</h1>
-  <p class="muted">Entre com a senha administrativa para gerenciar suas listas.</p>
-  <form id="loginForm"><div class="field"><label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" required></div><button class="btn" style="width:100%">Entrar</button></form>
+  <p class="muted">Entre com seu usuário do Firebase para gerenciar suas listas.</p>
+  <form id="loginForm"><div class="field"><label for="email">E-mail</label><input id="email" type="email" autocomplete="username" value="danielparuccikk@gmail.com" required></div><div class="field"><label for="password">Senha do Firebase</label><input id="password" type="password" autocomplete="current-password" required></div><button class="btn" style="width:100%">Entrar</button></form>
   <div id="loginMessage" class="message hidden"></div>
 </section>
 <main id="appView" class="shell hidden">
@@ -65,7 +65,15 @@ h1{font-size:clamp(29px,4vw,42px);letter-spacing:-1.7px;margin:0 0 8px}.muted{co
   <footer class="footer">Day Alertas · Plataforma independente da Day Imobiliária</footer>
 </main>
 <div id="modalRoot"></div>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script>
+firebase.initializeApp({
+ apiKey: "AIzaSyDtNn7FbvgVRplmvfSn8Bep3pEEeVqIlaU",
+ authDomain: "alertasrdprime.firebaseapp.com",
+ projectId: "alertasrdprime",
+ appId: "1:575904361143:web:b6e5ade434ed8b714a3b32"
+});
 const $ = (id) => document.getElementById(id);
 let listsCache = [];
 function showMessage(target, text, error=false){const el=$(target);el.textContent=text;el.classList.remove('hidden','error');if(error)el.classList.add('error');}
@@ -103,7 +111,19 @@ async function loadContacts(){
 function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function openModal(content){$('modalRoot').innerHTML='<div class="modal-backdrop" id="backdrop"><section class="modal">'+content+'</section></div>'; $('backdrop').addEventListener('click',e=>{if(e.target.id==='backdrop')closeModal();});}
 function closeModal(){$('modalRoot').innerHTML='';}
-$('loginForm').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('password').value})});location.reload();}catch(err){showMessage('loginMessage',err.message,true);}});
+$('loginForm').addEventListener('submit',async e=>{
+ e.preventDefault();const button=e.target.querySelector('button[type="submit"],button:not([type])');
+ button.disabled=true;button.textContent='Entrando...';
+ try{
+  const credential=await firebase.auth().signInWithEmailAndPassword($('email').value.trim(),$('password').value);
+  const idToken=await credential.user.getIdToken(true);
+  await api('/api/auth/firebase-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idToken})});
+  location.reload();
+ }catch(err){
+  const msg=err.code==='auth/invalid-credential'||err.code==='auth/wrong-password'||err.code==='auth/user-not-found'?'E-mail ou senha do Firebase incorretos.':err.message;
+  showMessage('loginMessage',msg,true);button.disabled=false;button.textContent='Entrar';
+ }
+});
 $('logoutBtn').addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});location.reload();});
 $('refreshBtn').addEventListener('click',()=>refreshAll().catch(e=>showMessage('appMessage',e.message,true)));
 $('contactSearch').addEventListener('input',()=>loadContacts().catch(()=>{}));

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getDatabase } from 'firebase-admin/database';
+import { getAuth } from 'firebase-admin/auth';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -47,11 +48,11 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 const cookieName = 'day_alertas_session';
 const sessionSecret = process.env.SESSION_SECRET || '';
-const adminPassword = process.env.ADMIN_PASSWORD || '';
+const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 
 function sign(value) { return crypto.createHmac('sha256', sessionSecret).update(value).digest('base64url'); }
-function createSession() {
-  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url');
+function createSession(email, uid) {
+  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 12 * 60 * 60 * 1000, email, uid })).toString('base64url');
   return payload + '.' + sign(payload);
 }
 function validSession(token) {
@@ -136,12 +137,26 @@ app.get('/api/health', (_req, res) => res.json({
   ok: true, service: 'day-alertas', databaseConfigured: Boolean(db),
   database: 'Firebase Realtime Database', timestamp: new Date().toISOString()
 }));
-app.post('/api/auth/login', (req, res) => {
-  if (!adminPassword || !sessionSecret) return res.status(503).json({ error: 'auth_not_configured', message: 'Configure ADMIN_PASSWORD e SESSION_SECRET no Render.' });
-  const a = Buffer.from(String(req.body?.password || '')), b = Buffer.from(adminPassword);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'invalid_credentials', message: 'Senha incorreta.' });
-  res.cookie(cookieName, createSession(), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', maxAge: 12 * 60 * 60 * 1000, path: '/' });
-  res.json({ ok: true });
+app.post('/api/auth/firebase-login', async (req, res) => {
+  if (!adminEmail || !getApps().length) return res.status(503).json({
+    error: 'auth_not_configured',
+    message: 'Configure ADMIN_EMAIL e FIREBASE_SERVICE_ACCOUNT no Render.'
+  });
+  try {
+    const idToken = String(req.body?.idToken || '');
+    if (!idToken) return res.status(401).json({ error: 'invalid_credentials', message: 'Entre com seu e-mail e senha do Firebase.' });
+    const decoded = await getAuth().verifyIdToken(idToken);
+    if (String(decoded.email || '').trim().toLowerCase() !== adminEmail) {
+      return res.status(403).json({ error: 'not_authorized', message: 'Este usuário não tem permissão para acessar o painel.' });
+    }
+    res.cookie(cookieName, createSession(adminEmail, decoded.uid), {
+      httpOnly: true, secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict', maxAge: 12 * 60 * 60 * 1000, path: '/'
+    });
+    res.json({ ok: true, email: adminEmail });
+  } catch {
+    res.status(401).json({ error: 'invalid_credentials', message: 'Não foi possível validar seu acesso no Firebase.' });
+  }
 });
 app.post('/api/auth/logout', (_req, res) => {
   res.clearCookie(cookieName, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/' });
@@ -149,7 +164,7 @@ app.post('/api/auth/logout', (_req, res) => {
 });
 app.get('/api/auth/me', (req, res) => res.json({
   authenticated: validSession(readCookie(req, cookieName)),
-  authConfigured: Boolean(adminPassword && sessionSecret), databaseConfigured: Boolean(db)
+  authConfigured: Boolean(adminEmail && getApps().length), adminEmail, databaseConfigured: Boolean(db)
 }));
 
 app.get('/api/dashboard', requireAdmin, requireDatabase, async (_req, res, next) => {
