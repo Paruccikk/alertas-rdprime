@@ -12,7 +12,7 @@ Plataforma independente para cadastro de usuários aprovados pela administraçã
 1. O visitante cria uma conta com nome, e-mail, senha e WhatsApp.
 2. Firebase Authentication cria a identidade e o UID.
 3. O backend grava o perfil em `users/{uid}` com status `pending`.
-4. O administrador definido em `ADMIN_EMAIL` entra e aprova ou recusa o cadastro.
+4. O administrador é definido manualmente no Realtime Database, em `users/{uid}`, com `role: "admin"` e `status: "approved"`; ele entra e aprova ou recusa os demais cadastros pelo painel.
 5. Somente contas aprovadas podem entrar.
 6. Os dados de cada conta ficam isolados em `accounts/{uid}/` (listas, contatos e importações).
 
@@ -20,7 +20,7 @@ A senha fica exclusivamente no Firebase Authentication. Nunca grave senhas no Re
 
 ## Configuração local
 1. Copie `.env.example` para `.env`.
-2. Configure `FIREBASE_WEB_API_KEY`, `FIREBASE_PROJECT_ID`, `FIREBASE_DATABASE_URL`, `FIREBASE_SERVICE_ACCOUNT`, `ADMIN_EMAIL` e `SESSION_SECRET`.
+2. Configure `FIREBASE_WEB_API_KEY`, `FIREBASE_PROJECT_ID`, `FIREBASE_DATABASE_URL`, `FIREBASE_SERVICE_ACCOUNT` e `SESSION_SECRET`.
 3. Instale dependências com `npm install`.
 4. Execute `npm start`.
 5. Acesse `http://localhost:3000`.
@@ -33,7 +33,7 @@ Para este desenho, o navegador não acessa o banco diretamente. Mantenha as regr
 
 ## Segurança e privacidade
 - Nunca versione `.env`, service accounts, tokens ou segredos.
-- O administrador é definido por `ADMIN_EMAIL`; somente ele pode aprovar contas.
+- O papel administrativo vem exclusivamente de `users/{uid}/role` no Realtime Database. Para criar o primeiro administrador, localize o UID da conta no Firebase Authentication e cadastre manualmente `users/{uid}` com `uid`, `name`, `email`, `phone`, `role: "admin"`, `status: "approved"`, `createdAt` e `updatedAt`. Não permita gravação pública nesse nó; as regras do RTDB devem continuar negando acesso direto do navegador.
 - Cada usuário aprovado acessa apenas seu próprio nó `accounts/{uid}`.
 - A senha é gerenciada exclusivamente pelo Firebase Authentication.
 - Importar um telefone/e-mail não equivale a consentimento.

@@ -48,7 +48,6 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 const cookieName = 'day_alertas_session';
 const sessionSecret = process.env.SESSION_SECRET || '';
-const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 
 function sign(value) { return crypto.createHmac('sha256', sessionSecret).update(value).digest('base64url'); }
 function createSession(email, uid, role) {
@@ -163,7 +162,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (!email || !decoded.email_verified) {
       return res.status(403).json({ error: 'email_not_verified', message: 'Confirme seu endereço de e-mail pelo link enviado pelo Firebase antes de solicitar acesso.' });
     }
-    const isOwner = email === adminEmail;
+    const isAdmin = previous.role === 'admin';
     const ref = db.ref('users/' + decoded.uid);
     const existing = await ref.get();
     const previous = existing.exists() ? existing.val() : {};
@@ -172,21 +171,21 @@ app.post('/api/auth/register', async (req, res) => {
     if (!name) return res.status(400).json({ error: 'name_required', message: 'Informe seu nome completo.' });
     const profile = {
       uid: decoded.uid, name, email, phone,
-      role: isOwner ? 'admin' : 'user',
-      status: isOwner ? 'approved' : (previous.status || 'pending'),
+      role: isAdmin ? 'admin' : 'user',
+      status: isAdmin ? 'approved' : (previous.status || 'pending'),
       createdAt: previous.createdAt || Date.now(),
       updatedAt: Date.now()
     };
     await ref.set(profile);
-    res.status(201).json({ ok: true, status: profile.status, role: profile.role, message: isOwner ? 'Conta administrativa cadastrada.' : 'Cadastro recebido. Aguarde a aprovação da administração.' });
+    res.status(201).json({ ok: true, status: profile.status, role: profile.role, message: isAdmin ? 'Conta administrativa cadastrada.' : 'Cadastro recebido. Aguarde a aprovação da administração.' });
   } catch (error) {
     console.error('Falha no cadastro:', error.message);
     res.status(401).json({ error: 'invalid_credentials', message: 'Não foi possível validar o cadastro no Firebase.' });
   }
 });
 app.post('/api/auth/firebase-login', async (req, res) => {
-  if (!adminEmail || !getApps().length || !db) return res.status(503).json({
-    error: 'auth_not_configured', message: 'Configure ADMIN_EMAIL e Firebase no Render.'
+  if (!getApps().length || !db) return res.status(503).json({
+    error: 'auth_not_configured', message: 'Configure o Firebase Admin e o Realtime Database no Render.'
   });
   try {
     const idToken = String(req.body?.idToken || '');
@@ -194,20 +193,15 @@ app.post('/api/auth/firebase-login', async (req, res) => {
     const decoded = await getAuth().verifyIdToken(idToken);
     const email = String(decoded.email || '').trim().toLowerCase();
     if (!decoded.email_verified) return res.status(403).json({ error: 'email_not_verified', message: 'Confirme seu endereço de e-mail antes de entrar.' });
-    const isOwner = email === adminEmail;
     const profileRef = db.ref('users/' + decoded.uid);
-    let snap = await profileRef.get();
-    if (!snap.exists() && isOwner) {
-      await profileRef.set({ uid: decoded.uid, name: 'Administrador', email, phone: '', role: 'admin', status: 'approved', createdAt: Date.now(), updatedAt: Date.now() });
-      snap = await profileRef.get();
-    }
+    const snap = await profileRef.get();
     if (!snap.exists()) return res.status(403).json({ error: 'registration_required', message: 'Cadastro não localizado. Saia e conclua o cadastro primeiro.' });
     const profile = snap.val();
     if (profile.status !== 'approved') return res.status(403).json({
       error: profile.status === 'rejected' ? 'registration_rejected' : 'approval_pending',
       message: profile.status === 'rejected' ? 'Seu cadastro não foi aprovado. Entre em contato com a administração.' : 'Seu cadastro está aguardando aprovação da administração.'
     });
-    const role = isOwner ? 'admin' : 'user';
+    const role = profile.role === 'admin' ? 'admin' : 'user';
     res.cookie(cookieName, createSession(email, decoded.uid, role), {
       httpOnly: true, secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict', maxAge: 12 * 60 * 60 * 1000, path: '/'
@@ -247,7 +241,7 @@ app.get('/api/auth/me', (req, res) => {
   const session = readSession(readCookie(req, cookieName));
   res.json({
     authenticated: Boolean(session), role: session?.role || null, uid: session?.uid || null,
-    authConfigured: Boolean(adminEmail && getApps().length), databaseConfigured: Boolean(db)
+    authConfigured: Boolean(getApps().length && db), databaseConfigured: Boolean(db)
   });
 });
 

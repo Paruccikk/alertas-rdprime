@@ -89,7 +89,7 @@ async function boot(){
   try{
     await initializeFirebase();
     const state=await api('/api/auth/me');
-    if(!state.authConfigured){$('loginView').classList.remove('hidden');showMessage('loginMessage','O acesso administrativo ainda precisa ser configurado no Render.');return;}
+    if(!state.authConfigured){$('loginView').classList.remove('hidden');showMessage('loginMessage','O serviço de autenticação do Firebase ainda não está configurado no servidor.');return;}
     if(!state.authenticated){$('loginView').classList.remove('hidden');return;}
     $('appView').classList.remove('hidden');
     if(state.role==='admin'){ $('approvalPanel').classList.remove('hidden'); await loadPendingUsers(); }
