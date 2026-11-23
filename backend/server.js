@@ -1,37 +1,47 @@
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
-import cors from 'cors';
 import morgan from 'morgan';
 import multer from 'multer';
 import ExcelJS from 'exceljs';
 import { parse as parseCsv } from 'csv-parse/sync';
-import pg from 'pg';
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { getDatabase } from 'firebase-admin/database';
 
-const { Pool } = pg;
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(here, '../frontend');
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 1 }
-});
-const pool = process.env.DATABASE_URL ? new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
-  max: 5,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000
-}) : null;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+
+let db = null;
+let firebaseInitError = '';
+try {
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (raw) {
+    const serviceAccount = JSON.parse(raw);
+    if (!getApps().length) initializeApp({
+      credential: cert({
+        projectId: serviceAccount.project_id || process.env.FIREBASE_PROJECT_ID,
+        clientEmail: serviceAccount.client_email,
+        privateKey: String(serviceAccount.private_key || '').replace(/\\n/g, '\n')
+      }),
+      databaseURL: process.env.FIREBASE_DATABASE_URL || 'https://alertasrdprime-default-rtdb.firebaseio.com'
+    });
+    db = getDatabase();
+  } else {
+    firebaseInitError = 'FIREBASE_SERVICE_ACCOUNT não configurada.';
+  }
+} catch (error) {
+  firebaseInitError = error.message;
+  console.error('Firebase não inicializado:', error.message);
+}
 
 app.disable('x-powered-by');
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'same-site' } }));
-app.use(cors({ origin: process.env.APP_BASE_URL || true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
@@ -39,9 +49,7 @@ const cookieName = 'day_alertas_session';
 const sessionSecret = process.env.SESSION_SECRET || '';
 const adminPassword = process.env.ADMIN_PASSWORD || '';
 
-function sign(value) {
-  return crypto.createHmac('sha256', sessionSecret).update(value).digest('base64url');
-}
+function sign(value) { return crypto.createHmac('sha256', sessionSecret).update(value).digest('base64url'); }
 function createSession() {
   const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url');
   return payload + '.' + sign(payload);
@@ -50,11 +58,9 @@ function validSession(token) {
   if (!sessionSecret || !token) return false;
   const [payload, signature] = token.split('.');
   if (!payload || !signature) return false;
-  const expected = Buffer.from(sign(payload));
-  const received = Buffer.from(signature);
+  const expected = Buffer.from(sign(payload)), received = Buffer.from(signature);
   if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) return false;
-  try { return JSON.parse(Buffer.from(payload, 'base64url').toString()).exp > Date.now(); }
-  catch { return false; }
+  try { return JSON.parse(Buffer.from(payload, 'base64url').toString()).exp > Date.now(); } catch { return false; }
 }
 function readCookie(req, name) {
   const raw = req.headers.cookie || '';
@@ -66,7 +72,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 function requireDatabase(req, res, next) {
-  if (!pool) return res.status(503).json({ error: 'database_not_configured', message: 'Banco de dados ainda não configurado.' });
+  if (!db) return res.status(503).json({ error: 'database_not_configured', message: 'Firebase ainda não está conectado. Configure a credencial de serviço no Render.' });
   next();
 }
 function normalizeHeader(value) {
@@ -75,9 +81,8 @@ function normalizeHeader(value) {
 const aliases = {
   name: ['nome','name','nomecompleto','fullname','contato','cliente','primeironome','firstname'],
   email: ['email','e-mail','correioeletronico','mail'],
-  phone: ['telefone','celular','whatsapp','fone','phone','mobile','numerod telefone','numerotelefone','dddtelefone','contato1'],
-  city: ['cidade','city','municipio'],
-  state: ['estado','uf','state'],
+  phone: ['telefone','celular','whatsapp','fone','phone','mobile','numerodtelefone','numerotelefone','dddtelefone','contato1'],
+  city: ['cidade','city','municipio'], state: ['estado','uf','state'],
   interest: ['interesse','imovel','tipoimovel','categoria','interest'],
   source: ['origem','source','fonte','formulario','campaign']
 };
@@ -101,8 +106,10 @@ function normalizePhone(value) {
 async function parseUpload(file) {
   const ext = path.extname(file.originalname).toLowerCase();
   if (ext === '.csv' || ext === '.txt') {
-    const text = file.buffer.toString('utf8').replace(/^\uFEFF/, '');
-    return parseCsv(text, { columns: true, skip_empty_lines: true, bom: true, relax_column_count: true, trim: true });
+    const content = file.buffer.toString('utf8').replace(/^\uFEFF/, '');
+    const firstLine = content.split(/\r?\n/, 1)[0] || '';
+    const delimiter = (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length ? ';' : ',';
+    return parseCsv(content, { columns: true, skip_empty_lines: true, bom: true, relax_column_count: true, trim: true, delimiter });
   }
   if (ext === '.xlsx') {
     const workbook = new ExcelJS.Workbook();
@@ -122,17 +129,16 @@ async function parseUpload(file) {
   }
   throw new Error('Formato não suportado. Envie um arquivo .csv ou .xlsx.');
 }
+function valuesOf(snapshot) { return snapshot.exists() ? snapshot.val() || {} : {}; }
+function asList(id, value) { return { id, ...value, contacts: Number(value.contactCount || 0) }; }
 
 app.get('/api/health', (_req, res) => res.json({
-  ok: true, service: 'day-alertas', databaseConfigured: Boolean(pool),
-  timestamp: new Date().toISOString()
+  ok: true, service: 'day-alertas', databaseConfigured: Boolean(db),
+  database: 'Firebase Realtime Database', timestamp: new Date().toISOString()
 }));
-
 app.post('/api/auth/login', (req, res) => {
   if (!adminPassword || !sessionSecret) return res.status(503).json({ error: 'auth_not_configured', message: 'Configure ADMIN_PASSWORD e SESSION_SECRET no Render.' });
-  const password = String(req.body?.password || '');
-  const a = Buffer.from(password);
-  const b = Buffer.from(adminPassword);
+  const a = Buffer.from(String(req.body?.password || '')), b = Buffer.from(adminPassword);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'invalid_credentials', message: 'Senha incorreta.' });
   res.cookie(cookieName, createSession(), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', maxAge: 12 * 60 * 60 * 1000, path: '/' });
   res.json({ ok: true });
@@ -141,26 +147,28 @@ app.post('/api/auth/logout', (_req, res) => {
   res.clearCookie(cookieName, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/' });
   res.json({ ok: true });
 });
-app.get('/api/auth/me', (req, res) => res.json({ authenticated: validSession(readCookie(req, cookieName)), authConfigured: Boolean(adminPassword && sessionSecret), databaseConfigured: Boolean(pool) }));
+app.get('/api/auth/me', (req, res) => res.json({
+  authenticated: validSession(readCookie(req, cookieName)),
+  authConfigured: Boolean(adminPassword && sessionSecret), databaseConfigured: Boolean(db)
+}));
 
 app.get('/api/dashboard', requireAdmin, requireDatabase, async (_req, res, next) => {
   try {
-    const [lists, contacts, imports] = await Promise.all([
-      pool.query('SELECT count(*)::int AS total FROM contact_lists'),
-      pool.query('SELECT count(*)::int AS total FROM contacts WHERE status = $1', ['active']),
-      pool.query("SELECT count(*)::int AS total FROM imports WHERE status = 'completed'")
+    const [listsSnap, contactsSnap, importsSnap] = await Promise.all([
+      db.ref('contact_lists').get(), db.ref('contacts').get(), db.ref('imports').get()
     ]);
-    res.json({ lists: lists.rows[0].total, contacts: contacts.rows[0].total, imports: imports.rows[0].total });
+    const lists = valuesOf(listsSnap), contacts = valuesOf(contactsSnap), imports = valuesOf(importsSnap);
+    res.json({
+      lists: Object.keys(lists).length,
+      contacts: Object.values(contacts).filter(c => c.status !== 'unsubscribed').length,
+      imports: Object.values(imports).filter(i => i.status === 'completed').length
+    });
   } catch (error) { next(error); }
 });
 app.get('/api/lists', requireAdmin, requireDatabase, async (_req, res, next) => {
   try {
-    const result = await pool.query(`SELECT l.id, l.name, l.description, l.created_at,
-      count(c.id)::int AS contacts
-      FROM contact_lists l LEFT JOIN contacts c ON c.source_import_id IN
-        (SELECT i.id FROM imports i WHERE i.list_id = l.id)
-      GROUP BY l.id ORDER BY l.created_at DESC`);
-    res.json(result.rows);
+    const data = valuesOf(await db.ref('contact_lists').get());
+    res.json(Object.entries(data).map(([id, value]) => asList(id, value)).sort((a,b) => b.createdAt - a.createdAt));
   } catch (error) { next(error); }
 });
 app.post('/api/lists', requireAdmin, requireDatabase, async (req, res, next) => {
@@ -168,37 +176,48 @@ app.post('/api/lists', requireAdmin, requireDatabase, async (req, res, next) => 
     const name = String(req.body?.name || '').trim().slice(0, 120);
     const description = String(req.body?.description || '').trim().slice(0, 500);
     if (!name) return res.status(400).json({ error: 'name_required', message: 'Informe o nome da lista.' });
-    const result = await pool.query('INSERT INTO contact_lists(name, description) VALUES($1,$2) RETURNING id,name,description,created_at', [name, description]);
-    res.status(201).json(result.rows[0]);
+    const ref = db.ref('contact_lists').push();
+    const value = { name, description, contactCount: 0, createdAt: Date.now() };
+    await ref.set(value);
+    res.status(201).json({ id: ref.key, ...value, contacts: 0 });
   } catch (error) { next(error); }
 });
 app.get('/api/imports', requireAdmin, requireDatabase, async (_req, res, next) => {
   try {
-    const result = await pool.query(`SELECT i.id, i.original_filename, i.status, i.total_rows,
-      i.imported_rows, i.rejected_rows, i.created_at, l.name AS list_name
-      FROM imports i LEFT JOIN contact_lists l ON l.id = i.list_id
-      ORDER BY i.created_at DESC LIMIT 100`);
-    res.json(result.rows);
+    const [importsSnap, listsSnap] = await Promise.all([db.ref('imports').get(), db.ref('contact_lists').get()]);
+    const imports = valuesOf(importsSnap), lists = valuesOf(listsSnap);
+    res.json(Object.entries(imports).map(([id, value]) => ({
+      id, ...value, list_name: lists[value.listId]?.name || 'Lista'
+    })).sort((a,b) => b.createdAt - a.createdAt).slice(0, 100));
   } catch (error) { next(error); }
 });
 app.post('/api/imports', requireAdmin, requireDatabase, upload.single('file'), async (req, res, next) => {
-  const client = await pool.connect();
   try {
     if (!req.file) return res.status(400).json({ error: 'file_required', message: 'Selecione um arquivo.' });
     const listId = String(req.body.listId || '');
-    const list = await client.query('SELECT id FROM contact_lists WHERE id = $1', [listId]);
-    if (!list.rowCount) return res.status(400).json({ error: 'list_not_found', message: 'Selecione uma lista válida.' });
+    const listRef = db.ref('contact_lists/' + listId);
+    const listSnap = await listRef.get();
+    if (!listSnap.exists()) return res.status(400).json({ error: 'list_not_found', message: 'Selecione uma lista válida.' });
     const rows = await parseUpload(req.file);
     if (!rows.length) return res.status(400).json({ error: 'empty_file', message: 'O arquivo não contém linhas de dados.' });
     if (rows.length > 20000) return res.status(413).json({ error: 'too_many_rows', message: 'O limite por importação é de 20.000 linhas.' });
-    await client.query('BEGIN');
-    const importResult = await client.query(
-      `INSERT INTO imports(list_id, original_filename, stored_path, status, total_rows)
-       VALUES($1,$2,$3,'processing',$4) RETURNING id`,
-      [listId, req.file.originalname.slice(0, 255), 'memory://processed', rows.length]
-    );
-    const importId = importResult.rows[0].id;
+
+    const importRef = db.ref('imports').push();
+    const importRecord = {
+      listId, original_filename: req.file.originalname.slice(0, 255),
+      status: 'processing', total_rows: rows.length, imported_rows: 0,
+      duplicate_rows: 0, rejected_rows: 0, createdAt: Date.now()
+    };
+    await importRef.set(importRecord);
+
+    const contacts = valuesOf(await db.ref('contacts').get());
+    const emailIndex = new Map(), phoneIndex = new Map();
+    for (const [id, c] of Object.entries(contacts)) {
+      if (c.email) emailIndex.set(c.email, id);
+      if (c.phone) phoneIndex.set(c.phone, id);
+    }
     let imported = 0, duplicates = 0, rejected = 0;
+    const updates = {};
     for (const row of rows) {
       const name = getField(row, 'name').slice(0, 180) || null;
       const email = normalizeEmail(getField(row, 'email'));
@@ -208,53 +227,59 @@ app.post('/api/imports', requireAdmin, requireDatabase, upload.single('file'), a
       const interest = getField(row, 'interest').slice(0, 160) || null;
       const source = getField(row, 'source').slice(0, 160) || null;
       if (!email && !phone) { rejected++; continue; }
-      const existing = await client.query(
-        'SELECT id FROM contacts WHERE ($1::text IS NOT NULL AND email_normalized=$1) OR ($2::text IS NOT NULL AND phone_e164=$2) LIMIT 1',
-        [email, phone]
-      );
-      if (existing.rowCount) {
-        await client.query(
-          `UPDATE contacts SET full_name=COALESCE(full_name,$2),
-             city=COALESCE(city,$3), state=COALESCE(state,$4), interest=COALESCE(interest,$5),
-             updated_at=now() WHERE id=$1`,
-          [existing.rows[0].id, name, city, state, interest]
-        );
+      const existingId = (email && emailIndex.get(email)) || (phone && phoneIndex.get(phone));
+      if (existingId) {
+        const existing = contacts[existingId] || {};
+        const next = {
+          ...existing,
+          full_name: existing.full_name || name,
+          city: existing.city || city, state: existing.state || state,
+          interest: existing.interest || interest,
+          listIds: { ...(existing.listIds || {}), [listId]: true },
+          updatedAt: Date.now()
+        };
+        contacts[existingId] = next;
+        updates['contacts/' + existingId] = next;
         duplicates++;
-        continue;
-      }
-      try {
-        await client.query(
-          `INSERT INTO contacts(email_normalized, phone_e164, full_name, city, state, interest, source, source_import_id)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [email, phone, name, city, state, interest, source || req.file.originalname.slice(0, 160), importId]
-        );
+      } else {
+        const ref = db.ref('contacts').push();
+        const value = {
+          email, phone, full_name: name, city, state, interest,
+          source: source || req.file.originalname.slice(0, 160),
+          status: 'active', listIds: { [listId]: true },
+          sourceImportId: importRef.key, createdAt: Date.now(), updatedAt: Date.now()
+        };
+        contacts[ref.key] = value;
+        updates['contacts/' + ref.key] = value;
+        if (email) emailIndex.set(email, ref.key);
+        if (phone) phoneIndex.set(phone, ref.key);
         imported++;
-      } catch (error) {
-        if (error.code === '23505') duplicates++;
-        else throw error;
       }
     }
-    await client.query(
-      `UPDATE imports SET status='completed', imported_rows=$2, rejected_rows=$3 WHERE id=$1`,
-      [importId, imported, rejected]
-    );
-    await client.query('COMMIT');
-    res.status(201).json({ id: importId, total: rows.length, imported, duplicates, rejected });
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    next(error);
-  } finally { client.release(); }
+    const currentList = listSnap.val();
+    updates['contact_lists/' + listId] = {
+      ...currentList, contactCount: Object.values(contacts).filter(c => c.listIds?.[listId] && c.status !== 'unsubscribed').length,
+      updatedAt: Date.now()
+    };
+    updates['imports/' + importRef.key] = {
+      ...importRecord, status: 'completed', imported_rows: imported,
+      duplicate_rows: duplicates, rejected_rows: rejected, completedAt: Date.now()
+    };
+    await db.ref().update(updates);
+    res.status(201).json({ id: importRef.key, total: rows.length, imported, duplicates, rejected });
+  } catch (error) { next(error); }
 });
 app.get('/api/contacts', requireAdmin, requireDatabase, async (req, res, next) => {
   try {
-    const q = String(req.query.q || '').trim().slice(0, 100);
-    const result = await pool.query(
-      `SELECT id, full_name, email_normalized AS email, phone_e164 AS phone, city, state, interest, status, created_at
-       FROM contacts
-       WHERE ($1 = '' OR full_name ILIKE '%' || $1 || '%' OR email_normalized ILIKE '%' || $1 || '%' OR phone_e164 ILIKE '%' || $1 || '%')
-       ORDER BY created_at DESC LIMIT 200`, [q]
-    );
-    res.json(result.rows);
+    const q = String(req.query.q || '').trim().toLocaleLowerCase('pt-BR').slice(0, 100);
+    const data = valuesOf(await db.ref('contacts').get());
+    const rows = Object.entries(data).map(([id, c]) => ({
+      id, full_name: c.full_name, email: c.email, phone: c.phone,
+      city: c.city, state: c.state, interest: c.interest,
+      status: c.status || 'active', created_at: c.createdAt
+    })).filter(c => !q || [c.full_name,c.email,c.phone,c.city,c.state,c.interest].some(v => String(v || '').toLocaleLowerCase('pt-BR').includes(q)))
+      .sort((a,b) => (b.created_at || 0) - (a.created_at || 0)).slice(0, 200);
+    res.json(rows);
   } catch (error) { next(error); }
 });
 
@@ -267,19 +292,8 @@ app.use((err, _req, res, _next) => {
     message: status === 400 ? 'Arquivo inválido ou maior que 10 MB.' : (process.env.NODE_ENV === 'production' ? 'Não foi possível concluir a operação.' : err.message)
   });
 });
-
-async function start() {
-  if (pool) {
-    try {
-      const schema = await fs.readFile(path.resolve(here, '../database/schema.sql'), 'utf8');
-      await pool.query(schema);
-      console.log('Banco de dados conectado e estrutura verificada.');
-    } catch (error) {
-      console.error('Falha ao preparar o banco de dados:', error.message);
-    }
-  } else {
-    console.warn('DATABASE_URL não configurada. API de dados ficará indisponível até conectar o PostgreSQL.');
-  }
-  app.listen(port, '0.0.0.0', () => console.log(`Day Alertas disponível na porta ${port}`));
-}
-start();
+app.listen(port, '0.0.0.0', () => {
+  if (db) console.log('Firebase Realtime Database configurado.');
+  else console.warn('Firebase aguardando credencial administrativa:', firebaseInitError);
+  console.log(`Day Alertas disponível na porta ${port}`);
+});

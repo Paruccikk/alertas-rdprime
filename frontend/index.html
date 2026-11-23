@@ -82,7 +82,7 @@ async function boot(){
     if(!state.authConfigured){$('loginView').classList.remove('hidden');showMessage('loginMessage','O acesso administrativo ainda precisa ser configurado no Render.');return;}
     if(!state.authenticated){$('loginView').classList.remove('hidden');return;}
     $('appView').classList.remove('hidden');
-    if(!state.databaseConfigured){showMessage('appMessage','O painel está no ar. Para salvar listas e contatos, falta conectar o banco PostgreSQL.');return;}
+    if(!state.databaseConfigured){showMessage('appMessage','O painel está no ar. Para salvar listas e contatos, falta conectar o Firebase Realtime Database no Render.');return;}
     await refreshAll();
   }catch(e){$('loginView').classList.remove('hidden');showMessage('loginMessage',e.message,true);}
 }
